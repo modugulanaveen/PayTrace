@@ -29,7 +29,10 @@ export async function saveExpense(statement: string, type: TransactionType, amou
 
 export async function getExpenses() {
   if (!supabase) throw new Error('Supabase is not configured.')
-  const { data, error } = await supabase.from('expense_records').select('*').order('transaction_date', { ascending: false })
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  if (authError) throw new Error(`Could not verify your login: ${authError.message}`)
+  if (!user) throw new Error('Please log in again to view your expense history.')
+  const { data, error } = await supabase.from('expense_records').select('*').eq('user_id', user.id).order('transaction_date', { ascending: false })
   if (error) throw new Error(error.message)
   return (data ?? []) as ExpenseRecord[]
 }
