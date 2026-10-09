@@ -20,6 +20,7 @@ export default function RecordExpense() {
   const [supported, setSupported] = useState(true)
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
   const finalTextRef = useRef('')
+  const recognitionBaseTextRef = useRef('')
 
   useEffect(() => {
     setSupported(Boolean(window.SpeechRecognition || window.webkitSpeechRecognition))
@@ -40,21 +41,23 @@ export default function RecordExpense() {
       return
     }
 
-    finalTextRef.current = text
+    recognitionBaseTextRef.current = finalTextRef.current
     recognition.lang = 'en-IN'
     recognition.continuous = true
     recognition.interimResults = true
     recognition.onstart = () => setRecording(true)
     recognition.onresult = (event) => {
-      let interim = ''
-      let finalPart = ''
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const finalParts: string[] = []
+      const interimParts: string[] = []
+      for (let i = 0; i < event.results.length; i += 1) {
         const transcript = event.results[i][0].transcript
-        if (event.results[i].isFinal) finalPart += transcript
-        else interim += transcript
+        if (event.results[i].isFinal) finalParts.push(transcript)
+        else interimParts.push(transcript)
       }
-      if (finalPart) finalTextRef.current = `${finalTextRef.current} ${finalPart}`.trim()
-      setText(`${finalTextRef.current}${interim ? ` ${interim}` : ''}`.trim())
+      const finalTranscript = finalParts.join(' ').trim()
+      const interimTranscript = interimParts.join(' ').trim()
+      finalTextRef.current = [recognitionBaseTextRef.current, finalTranscript].filter(Boolean).join(' ')
+      setText([finalTextRef.current, interimTranscript].filter(Boolean).join(' '))
     }
     recognition.onerror = (event) => {
       const messages: Record<string, string> = {
@@ -70,7 +73,10 @@ export default function RecordExpense() {
         setError(messages[event.error] ?? `Speech recognition failed (${event.error}). Check microphone permissions and try again.`)
       }
     }
-    recognition.onend = () => setRecording(false)
+    recognition.onend = () => {
+      setRecording(false)
+      setText(finalTextRef.current)
+    }
     recognitionRef.current = recognition
     try {
       recognition.start()
@@ -89,6 +95,7 @@ export default function RecordExpense() {
     recognitionRef.current?.abort()
     setText('')
     finalTextRef.current = ''
+    recognitionBaseTextRef.current = ''
     setType('')
     setError('')
     setTimeout(startRecording, 100)
@@ -110,6 +117,7 @@ export default function RecordExpense() {
       await saveExpense(text, type, extractAmount(text))
       setText('')
       finalTextRef.current = ''
+      recognitionBaseTextRef.current = ''
       setType('')
       navigate('/history')
     } catch (err) {
