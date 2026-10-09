@@ -21,6 +21,7 @@ export default function RecordExpense() {
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
   const finalTextRef = useRef('')
   const recognitionBaseTextRef = useRef('')
+  const recognitionResultsRef = useRef<Array<{ transcript: string; isFinal: boolean }>>([])
 
   useEffect(() => {
     setSupported(Boolean(window.SpeechRecognition || window.webkitSpeechRecognition))
@@ -42,26 +43,26 @@ export default function RecordExpense() {
     }
 
     recognitionBaseTextRef.current = finalTextRef.current
+    recognitionResultsRef.current = []
     recognition.lang = 'en-IN'
     recognition.continuous = true
     recognition.interimResults = true
     recognition.onstart = () => setRecording(true)
     recognition.onresult = (event) => {
-      const finalParts: string[] = []
-      const interimParts: string[] = []
-      // SpeechRecognition returns the full result list on each event. Only
-      // consume entries from resultIndex onward or previous final words get
-      // appended again every time an interim result changes.
+      const results = recognitionResultsRef.current
+      results.length = event.results.length
+      // Keep a copy of each result slot. Browsers may revise an interim slot
+      // several times before finalizing it, so appending event text loses or
+      // repeats words as the result index moves.
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const transcript = event.results[i][0].transcript
-        if (event.results[i].isFinal) finalParts.push(transcript)
-        else interimParts.push(transcript)
+        results[i] = {
+          transcript: event.results[i][0].transcript,
+          isFinal: event.results[i].isFinal,
+        }
       }
-      const newFinalTranscript = finalParts.join(' ').trim()
-      const interimTranscript = interimParts.join(' ').trim()
-      if (newFinalTranscript) {
-        finalTextRef.current = [finalTextRef.current || recognitionBaseTextRef.current, newFinalTranscript].filter(Boolean).join(' ')
-      }
+      const finalTranscript = results.filter(result => result?.isFinal).map(result => result.transcript).join(' ').trim()
+      const interimTranscript = results.filter(result => result && !result.isFinal).map(result => result.transcript).join(' ').trim()
+      finalTextRef.current = [recognitionBaseTextRef.current, finalTranscript].filter(Boolean).join(' ')
       setText([finalTextRef.current, interimTranscript].filter(Boolean).join(' '))
     }
     recognition.onerror = (event) => {
