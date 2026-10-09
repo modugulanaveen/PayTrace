@@ -49,14 +49,19 @@ export default function RecordExpense() {
     recognition.onresult = (event) => {
       const finalParts: string[] = []
       const interimParts: string[] = []
-      for (let i = 0; i < event.results.length; i += 1) {
+      // SpeechRecognition returns the full result list on each event. Only
+      // consume entries from resultIndex onward or previous final words get
+      // appended again every time an interim result changes.
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const transcript = event.results[i][0].transcript
         if (event.results[i].isFinal) finalParts.push(transcript)
         else interimParts.push(transcript)
       }
-      const finalTranscript = finalParts.join(' ').trim()
+      const newFinalTranscript = finalParts.join(' ').trim()
       const interimTranscript = interimParts.join(' ').trim()
-      finalTextRef.current = [recognitionBaseTextRef.current, finalTranscript].filter(Boolean).join(' ')
+      if (newFinalTranscript) {
+        finalTextRef.current = [finalTextRef.current || recognitionBaseTextRef.current, newFinalTranscript].filter(Boolean).join(' ')
+      }
       setText([finalTextRef.current, interimTranscript].filter(Boolean).join(' '))
     }
     recognition.onerror = (event) => {
