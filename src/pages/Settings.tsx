@@ -1,0 +1,1 @@
+export default function Settings(){return <div className="content"><div className="section"><h2>Settings</h2><p className="muted">Company and account settings will be configured here.</p><div className="field"><label>Company Name</label><input value="ANVION INNOVATIONS PRIVATE LIMITED" readOnly/></div></div></div>}
