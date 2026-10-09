@@ -12,7 +12,7 @@ function createRecognition() {
 
 export default function RecordExpense() {
   const [recording, setRecording] = useState(false)
-  const [starting, setStarting] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
   const [text, setText] = useState('')
   const [type, setType] = useState<Selection>('')
   const [saving, setSaving] = useState(false)
@@ -23,40 +23,27 @@ export default function RecordExpense() {
   const finalTextRef = useRef('')
   const recognitionBaseTextRef = useRef('')
   const recognitionResultsRef = useRef<Array<{ transcript: string; isFinal: boolean }>>([])
-  const microphoneStreamRef = useRef<MediaStream | null>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const startRequestRef = useRef(0)
-
-  const releaseAudioInput = () => {
-    microphoneStreamRef.current?.getTracks().forEach(track => track.stop())
-    microphoneStreamRef.current = null
-    const audioContext = audioContextRef.current
-    audioContextRef.current = null
-    if (audioContext && audioContext.state !== 'closed') {
-      void audioContext.close().catch(err => console.error('Could not close microphone audio processing.', err))
-    }
-  }
+  const shouldContinueRef = useRef(false)
+  const restartTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
-    setSupported(Boolean(window.SpeechRecognition || window.webkitSpeechRecognition))
+    const hasRecognition = Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
+    setSupported(hasRecognition)
+    if (!hasRecognition) setError('Speech recognition is not available in this browser. Open this page in Chrome and try again.')
     return () => {
-      startRequestRef.current += 1
+      shouldContinueRef.current = false
+      if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
       recognitionRef.current?.abort()
-      releaseAudioInput()
+      window.speechSynthesis?.cancel()
     }
   }, [])
 
-  const startRecording = async () => {
+  const startRecording = () => {
     setError('')
     if (!window.isSecureContext) {
       setError('Microphone access requires a secure connection. Open this app over HTTPS or on localhost.')
       return
     }
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError('Microphone access is unavailable in this browser. Use the latest Chrome or Edge over HTTPS.')
-      return
-    }
-
     const recognition = createRecognition()
     if (!recognition) {
       setSupported(false)
@@ -64,17 +51,14 @@ export default function RecordExpense() {
       return
     }
 
-    const requestId = startRequestRef.current + 1
-    startRequestRef.current = requestId
-    setStarting(true)
+    shouldContinueRef.current = true
     recognitionBaseTextRef.current = finalTextRef.current
     recognitionResultsRef.current = []
     recognition.lang = 'en-IN'
     recognition.continuous = true
     recognition.interimResults = true
     recognition.onstart = () => {
-      if (recognitionRef.current !== recognition) return
-      setStarting(false)
+      if (recognitionRef.current !== recognition || !shouldContinueRef.current) return
       setRecording(true)
     }
     recognition.onresult = (event) => {
@@ -106,107 +90,95 @@ export default function RecordExpense() {
         'service-not-allowed': 'The browser blocked its speech recognition service. Use the latest Chrome or Edge and allow microphone access.',
       }
       if (event.error !== 'aborted') {
-        setRecording(false)
-        setStarting(false)
         setError(messages[event.error] ?? `Speech recognition failed (${event.error}). Check microphone permissions and try again.`)
+        if (event.error !== 'no-speech') {
+          shouldContinueRef.current = false
+          setRecording(false)
+        }
       }
     }
     recognition.onend = () => {
       if (recognitionRef.current !== recognition) return
-      setRecording(false)
-      setStarting(false)
       setText(finalTextRef.current)
-      releaseAudioInput()
+      if (!shouldContinueRef.current) {
+        setRecording(false)
+        return
+      }
+
+      // Mobile Chrome can end a recognition session after a pause. Start a
+      // fresh session while the user still has recording turned on.
+      recognitionBaseTextRef.current = finalTextRef.current
+      recognitionResultsRef.current = []
+      restartTimerRef.current = window.setTimeout(() => {
+        if (!shouldContinueRef.current || recognitionRef.current !== recognition) return
+        try {
+          recognition.start()
+        } catch (err) {
+          shouldContinueRef.current = false
+          setRecording(false)
+          setError(err instanceof Error ? `Could not resume speech recognition: ${err.message}` : 'Could not resume speech recognition. Tap Start Recording to try again.')
+        }
+      }, 250)
     }
     recognitionRef.current = recognition
 
     try {
-      const microphoneStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          autoGainControl: true,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      })
-      if (requestId !== startRequestRef.current) {
-        microphoneStream.getTracks().forEach(track => track.stop())
-        return
-      }
-
-      microphoneStreamRef.current = microphoneStream
-      const audioContext = new AudioContext()
-      audioContextRef.current = audioContext
-      await audioContext.resume()
-      if (requestId !== startRequestRef.current) {
-        releaseAudioInput()
-        return
-      }
-
-      const source = audioContext.createMediaStreamSource(microphoneStream)
-      const gain = audioContext.createGain()
-      const compressor = audioContext.createDynamicsCompressor()
-      const destination = audioContext.createMediaStreamDestination()
-      gain.gain.value = 3
-      compressor.threshold.value = -24
-      compressor.knee.value = 18
-      compressor.ratio.value = 4
-      compressor.attack.value = 0.003
-      compressor.release.value = 0.25
-      source.connect(gain)
-      gain.connect(compressor)
-      compressor.connect(destination)
-
-      try {
-        recognition.start(destination.stream.getAudioTracks()[0])
-      } catch (err) {
-        if (!(err instanceof TypeError) && !(err instanceof DOMException && err.name === 'NotSupportedError')) throw err
-        setError('This browser cannot boost quiet microphone input. Speech recognition will use the normal microphone level; try the latest Chrome.')
-        releaseAudioInput()
-        recognition.start()
-      }
+      // Start synchronously inside the tap handler. Mobile browsers may reject
+      // recognition if microphone setup has awaited first.
+      recognition.start()
     } catch (err) {
-      releaseAudioInput()
+      shouldContinueRef.current = false
       setRecording(false)
-      setStarting(false)
-      if (requestId !== startRequestRef.current) return
-      const name = err instanceof DOMException ? err.name : ''
-      const message = name === 'NotAllowedError' || name === 'SecurityError'
-        ? 'Microphone access was blocked. Allow microphone access for this site in your browser settings, then try again.'
-        : name === 'NotFoundError' || name === 'DevicesNotFoundError'
-          ? 'No microphone was found. Connect a microphone and check your device input settings.'
-          : err instanceof Error
-            ? `Could not start microphone processing: ${err.message}`
-            : 'Could not start microphone processing. Check microphone permissions and try again.'
-      setError(message)
+      setError(err instanceof Error ? `Could not start speech recognition: ${err.message}` : 'Could not start speech recognition. Check microphone permissions and try again.')
     }
   }
 
   const stopRecording = () => {
+    shouldContinueRef.current = false
+    if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
     recognitionRef.current?.stop()
     setRecording(false)
   }
 
   const recordAgain = () => {
-    startRequestRef.current += 1
+    shouldContinueRef.current = false
+    if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
     recognitionRef.current?.abort()
     recognitionRef.current = null
-    releaseAudioInput()
     setRecording(false)
-    setStarting(false)
     setText('')
     finalTextRef.current = ''
     recognitionBaseTextRef.current = ''
     setType('')
     setError('')
-    setTimeout(startRecording, 100)
   }
 
   const readBack = () => {
     if (!text.trim()) return
+    if (!window.speechSynthesis) {
+      setError('Text-to-speech is not available in this browser.')
+      return
+    }
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.lang = 'en-IN'
+    const voices = window.speechSynthesis.getVoices()
+    utterance.voice = voices.find(voice => voice.lang.toLowerCase() === 'en-in')
+      ?? voices.find(voice => voice.lang.toLowerCase().startsWith('en'))
+      ?? null
+    utterance.onstart = () => setSpeaking(true)
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => {
+      setSpeaking(false)
+      setError('Could not read the statement aloud. Check that text-to-speech is enabled on your phone.')
+    }
+    setSpeaking(true)
     window.speechSynthesis.speak(utterance)
+  }
+
+  const stopReadBack = () => {
+    window.speechSynthesis?.cancel()
+    setSpeaking(false)
   }
 
   const confirmAndSave = async () => {
@@ -231,7 +203,7 @@ export default function RecordExpense() {
     <div className="content">
       <div className="section record-page">
         <div className="record-heading">
-          <div><h2>Record Expense</h2><p className="muted">Quiet speech is boosted on supported browsers. Your browser may process audio for recognition; this app does not store it.</p></div>
+          <div><h2>Record Expense</h2><p className="muted">Tap Start Recording and speak naturally. Your browser may process audio for recognition; this app does not store it.</p></div>
           <span className="privacy-badge">Text only</span>
         </div>
 
@@ -239,13 +211,13 @@ export default function RecordExpense() {
           <div className="wave-row" aria-hidden="true">
             {[16,28,42,24,52,34,18,38,26,46,20].map((height, index) => <span key={index} style={{ height }} />)}
           </div>
-          <button className={`mic ${recording ? 'mic-recording' : ''}`} onClick={recording ? stopRecording : startRecording} disabled={starting} aria-label={recording ? 'Stop recording' : 'Start recording'}>
+          <button className={`mic ${recording ? 'mic-recording' : ''}`} onClick={recording ? stopRecording : startRecording} disabled={!supported} aria-label={recording ? 'Stop recording' : 'Start recording'}>
             {recording ? <Square size={30} fill="currentColor" /> : <Mic size={34} />}
           </button>
-          <h3>{starting ? 'Preparing microphone…' : recording ? 'Recording…' : text ? 'Recording stopped' : 'Ready to record'}</h3>
+          <h3>{recording ? 'Recording…' : text ? 'Recording stopped' : 'Ready to record'}</h3>
           <p className="muted">{recording ? 'Speak naturally, then press Stop Recording.' : 'Press Start Recording when you are ready.'}</p>
-          <button className={recording ? 'stop-button' : 'primary'} onClick={recording ? stopRecording : startRecording} disabled={!supported || starting}>
-            {recording ? <><Square size={16} fill="currentColor" /> STOP RECORDING</> : starting ? 'PREPARING…' : <><Mic size={16} /> START RECORDING</>}
+          <button className={recording ? 'stop-button' : 'primary'} onClick={recording ? stopRecording : startRecording} disabled={!supported}>
+            {recording ? <><Square size={16} fill="currentColor" /> STOP RECORDING</> : <><Mic size={16} /> START RECORDING</>}
           </button>
         </div>
 
@@ -257,8 +229,8 @@ export default function RecordExpense() {
         </div>
 
         {text && <div className="action-row">
-          <button className="secondary" onClick={readBack}><Volume2 size={17} /> Read It Back</button>
-          <button className="secondary" onClick={recordAgain}><RotateCcw size={17} /> Record Again</button>
+          <button className="secondary" onClick={speaking ? stopReadBack : readBack}>{speaking ? <Square size={16} /> : <Volume2 size={17} />} {speaking ? 'Stop Reading' : 'Read It Back'}</button>
+          <button className="secondary" onClick={recordAgain}><RotateCcw size={17} /> Clear & Start Over</button>
           <button className="secondary" onClick={() => document.getElementById('statement')?.focus()}><Pencil size={17} /> Edit Text</button>
         </div>}
 
