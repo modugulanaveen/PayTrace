@@ -12,6 +12,7 @@ function createRecognition() {
 
 export default function RecordExpense() {
   const [recording, setRecording] = useState(false)
+  const [starting, setStarting] = useState(false)
   const [text, setText] = useState('')
   const [type, setType] = useState<Selection>('')
   const [saving, setSaving] = useState(false)
@@ -22,16 +23,37 @@ export default function RecordExpense() {
   const finalTextRef = useRef('')
   const recognitionBaseTextRef = useRef('')
   const recognitionResultsRef = useRef<Array<{ transcript: string; isFinal: boolean }>>([])
+  const microphoneStreamRef = useRef<MediaStream | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const startRequestRef = useRef(0)
+
+  const releaseAudioInput = () => {
+    microphoneStreamRef.current?.getTracks().forEach(track => track.stop())
+    microphoneStreamRef.current = null
+    const audioContext = audioContextRef.current
+    audioContextRef.current = null
+    if (audioContext && audioContext.state !== 'closed') {
+      void audioContext.close().catch(err => console.error('Could not close microphone audio processing.', err))
+    }
+  }
 
   useEffect(() => {
     setSupported(Boolean(window.SpeechRecognition || window.webkitSpeechRecognition))
-    return () => recognitionRef.current?.abort()
+    return () => {
+      startRequestRef.current += 1
+      recognitionRef.current?.abort()
+      releaseAudioInput()
+    }
   }, [])
 
-  const startRecording = () => {
+  const startRecording = async () => {
     setError('')
     if (!window.isSecureContext) {
       setError('Microphone access requires a secure connection. Open this app over HTTPS or on localhost.')
+      return
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Microphone access is unavailable in this browser. Use the latest Chrome or Edge over HTTPS.')
       return
     }
 
@@ -42,13 +64,21 @@ export default function RecordExpense() {
       return
     }
 
+    const requestId = startRequestRef.current + 1
+    startRequestRef.current = requestId
+    setStarting(true)
     recognitionBaseTextRef.current = finalTextRef.current
     recognitionResultsRef.current = []
     recognition.lang = 'en-IN'
     recognition.continuous = true
     recognition.interimResults = true
-    recognition.onstart = () => setRecording(true)
+    recognition.onstart = () => {
+      if (recognitionRef.current !== recognition) return
+      setStarting(false)
+      setRecording(true)
+    }
     recognition.onresult = (event) => {
+      if (recognitionRef.current !== recognition) return
       const results = recognitionResultsRef.current
       results.length = event.results.length
       // Keep a copy of each result slot. Browsers may revise an interim slot
@@ -66,6 +96,7 @@ export default function RecordExpense() {
       setText([finalTextRef.current, interimTranscript].filter(Boolean).join(' '))
     }
     recognition.onerror = (event) => {
+      if (recognitionRef.current !== recognition) return
       const messages: Record<string, string> = {
         'audio-capture': 'No microphone was found. Connect a microphone and check your device input settings.',
         'language-not-supported': 'Speech recognition for English (India) is not supported by this browser.',
@@ -76,19 +107,77 @@ export default function RecordExpense() {
       }
       if (event.error !== 'aborted') {
         setRecording(false)
+        setStarting(false)
         setError(messages[event.error] ?? `Speech recognition failed (${event.error}). Check microphone permissions and try again.`)
       }
     }
     recognition.onend = () => {
+      if (recognitionRef.current !== recognition) return
       setRecording(false)
+      setStarting(false)
       setText(finalTextRef.current)
+      releaseAudioInput()
     }
     recognitionRef.current = recognition
+
     try {
-      recognition.start()
+      const microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      })
+      if (requestId !== startRequestRef.current) {
+        microphoneStream.getTracks().forEach(track => track.stop())
+        return
+      }
+
+      microphoneStreamRef.current = microphoneStream
+      const audioContext = new AudioContext()
+      audioContextRef.current = audioContext
+      await audioContext.resume()
+      if (requestId !== startRequestRef.current) {
+        releaseAudioInput()
+        return
+      }
+
+      const source = audioContext.createMediaStreamSource(microphoneStream)
+      const gain = audioContext.createGain()
+      const compressor = audioContext.createDynamicsCompressor()
+      const destination = audioContext.createMediaStreamDestination()
+      gain.gain.value = 3
+      compressor.threshold.value = -24
+      compressor.knee.value = 18
+      compressor.ratio.value = 4
+      compressor.attack.value = 0.003
+      compressor.release.value = 0.25
+      source.connect(gain)
+      gain.connect(compressor)
+      compressor.connect(destination)
+
+      try {
+        recognition.start(destination.stream.getAudioTracks()[0])
+      } catch (err) {
+        if (!(err instanceof TypeError) && !(err instanceof DOMException && err.name === 'NotSupportedError')) throw err
+        setError('This browser cannot boost quiet microphone input. Speech recognition will use the normal microphone level; try the latest Chrome.')
+        releaseAudioInput()
+        recognition.start()
+      }
     } catch (err) {
+      releaseAudioInput()
       setRecording(false)
-      setError(err instanceof Error ? `Could not start speech recognition: ${err.message}` : 'Could not start speech recognition. Check microphone permissions and try again.')
+      setStarting(false)
+      if (requestId !== startRequestRef.current) return
+      const name = err instanceof DOMException ? err.name : ''
+      const message = name === 'NotAllowedError' || name === 'SecurityError'
+        ? 'Microphone access was blocked. Allow microphone access for this site in your browser settings, then try again.'
+        : name === 'NotFoundError' || name === 'DevicesNotFoundError'
+          ? 'No microphone was found. Connect a microphone and check your device input settings.'
+          : err instanceof Error
+            ? `Could not start microphone processing: ${err.message}`
+            : 'Could not start microphone processing. Check microphone permissions and try again.'
+      setError(message)
     }
   }
 
@@ -98,7 +187,12 @@ export default function RecordExpense() {
   }
 
   const recordAgain = () => {
+    startRequestRef.current += 1
     recognitionRef.current?.abort()
+    recognitionRef.current = null
+    releaseAudioInput()
+    setRecording(false)
+    setStarting(false)
     setText('')
     finalTextRef.current = ''
     recognitionBaseTextRef.current = ''
@@ -137,7 +231,7 @@ export default function RecordExpense() {
     <div className="content">
       <div className="section record-page">
         <div className="record-heading">
-          <div><h2>Record Expense</h2><p className="muted">Speak naturally. The audio is never saved.</p></div>
+          <div><h2>Record Expense</h2><p className="muted">Quiet speech is boosted on supported browsers. Your browser may process audio for recognition; this app does not store it.</p></div>
           <span className="privacy-badge">Text only</span>
         </div>
 
@@ -145,13 +239,13 @@ export default function RecordExpense() {
           <div className="wave-row" aria-hidden="true">
             {[16,28,42,24,52,34,18,38,26,46,20].map((height, index) => <span key={index} style={{ height }} />)}
           </div>
-          <button className={`mic ${recording ? 'mic-recording' : ''}`} onClick={recording ? stopRecording : startRecording} aria-label={recording ? 'Stop recording' : 'Start recording'}>
+          <button className={`mic ${recording ? 'mic-recording' : ''}`} onClick={recording ? stopRecording : startRecording} disabled={starting} aria-label={recording ? 'Stop recording' : 'Start recording'}>
             {recording ? <Square size={30} fill="currentColor" /> : <Mic size={34} />}
           </button>
-          <h3>{recording ? 'Recording…' : text ? 'Recording stopped' : 'Ready to record'}</h3>
-          <p className="muted">{recording ? 'Speak clearly, then press Stop Recording.' : 'Press Start Recording when you are ready.'}</p>
-          <button className={recording ? 'stop-button' : 'primary'} onClick={recording ? stopRecording : startRecording} disabled={!supported}>
-            {recording ? <><Square size={16} fill="currentColor" /> STOP RECORDING</> : <><Mic size={16} /> START RECORDING</>}
+          <h3>{starting ? 'Preparing microphone…' : recording ? 'Recording…' : text ? 'Recording stopped' : 'Ready to record'}</h3>
+          <p className="muted">{recording ? 'Speak naturally, then press Stop Recording.' : 'Press Start Recording when you are ready.'}</p>
+          <button className={recording ? 'stop-button' : 'primary'} onClick={recording ? stopRecording : startRecording} disabled={!supported || starting}>
+            {recording ? <><Square size={16} fill="currentColor" /> STOP RECORDING</> : starting ? 'PREPARING…' : <><Mic size={16} /> START RECORDING</>}
           </button>
         </div>
 
@@ -177,7 +271,7 @@ export default function RecordExpense() {
         </div>
 
         <button className="confirm-button" disabled={!text.trim() || !type || saving} onClick={confirmAndSave}>{saving ? <><LoaderCircle size={18} className="spin" /> Saving…</> : <><Check size={18} /> Confirm & Save</>}</button>
-        <p className="save-note">The current date and time are saved automatically. Audio is never stored.</p>
+        <p className="save-note">The current date and time are saved automatically. Audio is not stored by this app.</p>
       </div>
     </div>
   )

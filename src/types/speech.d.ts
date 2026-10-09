@@ -10,6 +10,7 @@ interface SpeechRecognitionInstance extends EventTarget {
   interimResults: boolean
   lang: string
   start(): void
+  start(audioTrack: MediaStreamTrack): void
   stop(): void
   abort(): void
   onstart: (() => void) | null
