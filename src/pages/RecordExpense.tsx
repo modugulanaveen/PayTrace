@@ -10,6 +10,46 @@ function createRecognition() {
   return Ctor ? new Ctor() : null
 }
 
+function joinSpeechParts(parts: string[]) {
+  const words: string[] = []
+  const key = (word: string) => word.toLowerCase().replace(/[.,!?;:]/g, '')
+
+  for (const part of parts) {
+    const next = part.trim().split(/\s+/).filter(Boolean)
+    let overlap = Math.min(words.length, next.length)
+    while (overlap > 0) {
+      const currentTail = words.slice(-overlap)
+      if (currentTail.every((word, index) => key(word) === key(next[index]))) break
+      overlap -= 1
+    }
+
+    for (const word of next.slice(overlap)) {
+      if (words.length && key(words[words.length - 1]) === key(word)) continue
+      words.push(word)
+    }
+  }
+
+  // Some phone speech services return the same growing phrase in several
+  // chunks. Remove immediately repeated phrase runs as well as word overlaps.
+  let changed = true
+  while (changed) {
+    changed = false
+    const maxPhraseLength = Math.min(12, Math.floor(words.length / 2))
+    for (let length = maxPhraseLength; length >= 2 && !changed; length -= 1) {
+      for (let start = 0; start + length * 2 <= words.length; start += 1) {
+        const repeated = words.slice(start, start + length).every((word, index) => key(word) === key(words[start + length + index]))
+        if (repeated) {
+          words.splice(start + length, length)
+          changed = true
+          break
+        }
+      }
+    }
+  }
+
+  return words.join(' ')
+}
+
 export default function RecordExpense() {
   const [recording, setRecording] = useState(false)
   const [speaking, setSpeaking] = useState(false)
@@ -90,10 +130,10 @@ export default function RecordExpense() {
           isFinal: event.results[i].isFinal,
         }
       }
-      const finalTranscript = results.filter(result => result?.isFinal).map(result => result.transcript).join(' ').trim()
-      const interimTranscript = results.filter(result => result && !result.isFinal).map(result => result.transcript).join(' ').trim()
-      finalTextRef.current = [recognitionBaseTextRef.current, finalTranscript].filter(Boolean).join(' ')
-      setText([finalTextRef.current, interimTranscript].filter(Boolean).join(' '))
+      const finalTranscript = joinSpeechParts(results.filter(result => result?.isFinal).map(result => result.transcript))
+      const interimTranscript = joinSpeechParts(results.filter(result => result && !result.isFinal).map(result => result.transcript))
+      finalTextRef.current = joinSpeechParts([recognitionBaseTextRef.current, finalTranscript])
+      setText(joinSpeechParts([finalTextRef.current, interimTranscript]))
     }
     recognition.onerror = (event) => {
       if (recognitionRef.current !== recognition) return
