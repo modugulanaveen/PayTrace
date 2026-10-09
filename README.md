@@ -24,6 +24,9 @@ Final integration package for the voice-to-text director expense statement app.
 5. Run `npm install`.
 6. Run `npm run dev`.
 
+## Vercel deployment
+The included `vercel.json` rewrites route requests to the app entry point, so refreshing or opening routes such as `/history` works on Vercel.
+
 ## Browser voice support
 Speech recognition is provided by the browser/device and is not saved as audio. Use a supported browser such as Chrome when speech recognition is available.
 

@@ -28,10 +28,15 @@ export default function RecordExpense() {
 
   const startRecording = () => {
     setError('')
+    if (!window.isSecureContext) {
+      setError('Microphone access requires a secure connection. Open this app over HTTPS or on localhost.')
+      return
+    }
+
     const recognition = createRecognition()
     if (!recognition) {
       setSupported(false)
-      setError('Speech-to-text is not supported in this browser. Please use a supported browser such as Chrome.')
+      setError('Speech-to-text is not supported in this browser. Use the latest Chrome or Edge over HTTPS.')
       return
     }
 
@@ -52,11 +57,27 @@ export default function RecordExpense() {
       setText(`${finalTextRef.current}${interim ? ` ${interim}` : ''}`.trim())
     }
     recognition.onerror = (event) => {
-      if (event.error !== 'aborted') setError(`Microphone error: ${event.error}. Please try again.`)
+      const messages: Record<string, string> = {
+        'audio-capture': 'No microphone was found. Connect a microphone and check your device input settings.',
+        'language-not-supported': 'Speech recognition for English (India) is not supported by this browser.',
+        'network': 'The speech recognition service could not be reached. Check your internet connection and try again.',
+        'no-speech': 'No speech was detected. Check your microphone input and speak a little closer to it.',
+        'not-allowed': 'Microphone access was blocked. Allow microphone access for this site in your browser settings, then try again.',
+        'service-not-allowed': 'The browser blocked its speech recognition service. Use the latest Chrome or Edge and allow microphone access.',
+      }
+      if (event.error !== 'aborted') {
+        setRecording(false)
+        setError(messages[event.error] ?? `Speech recognition failed (${event.error}). Check microphone permissions and try again.`)
+      }
     }
     recognition.onend = () => setRecording(false)
     recognitionRef.current = recognition
-    recognition.start()
+    try {
+      recognition.start()
+    } catch (err) {
+      setRecording(false)
+      setError(err instanceof Error ? `Could not start speech recognition: ${err.message}` : 'Could not start speech recognition. Check microphone permissions and try again.')
+    }
   }
 
   const stopRecording = () => {
