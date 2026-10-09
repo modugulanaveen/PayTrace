@@ -25,14 +25,19 @@ export default function RecordExpense() {
   const recognitionResultsRef = useRef<Array<{ transcript: string; isFinal: boolean }>>([])
   const shouldContinueRef = useRef(false)
   const restartTimerRef = useRef<number | null>(null)
+  const startTimeoutRef = useRef<number | null>(null)
+  const resultTimeoutRef = useRef<number | null>(null)
+  const hasStartedRef = useRef(false)
 
   useEffect(() => {
     const hasRecognition = Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
     setSupported(hasRecognition)
-    if (!hasRecognition) setError('Speech recognition is not available in this browser. Open this page in Chrome and try again.')
+    if (!hasRecognition) setError('This browser does not provide speech recognition. On your phone, tap the statement box and use the microphone on its keyboard to dictate.')
     return () => {
       shouldContinueRef.current = false
       if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
+      if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+      if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
       recognitionRef.current?.abort()
       window.speechSynthesis?.cancel()
     }
@@ -41,13 +46,13 @@ export default function RecordExpense() {
   const startRecording = () => {
     setError('')
     if (!window.isSecureContext) {
-      setError('Microphone access requires a secure connection. Open this app over HTTPS or on localhost.')
+      setError('This page is not using HTTPS. Phones block speech recognition on local network addresses such as 192.168.x.x, even when microphone permission is granted. Open the deployed HTTPS address; phone localhost is not your computer.')
       return
     }
     const recognition = createRecognition()
     if (!recognition) {
       setSupported(false)
-      setError('Speech-to-text is not supported in this browser. Use the latest Chrome or Edge over HTTPS.')
+      setError('Speech recognition is unavailable here. Open this site in Chrome over HTTPS, or tap the statement box and use your phone keyboard microphone.')
       return
     }
 
@@ -59,10 +64,21 @@ export default function RecordExpense() {
     recognition.interimResults = true
     recognition.onstart = () => {
       if (recognitionRef.current !== recognition || !shouldContinueRef.current) return
+      hasStartedRef.current = true
+      if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+      if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
+      resultTimeoutRef.current = window.setTimeout(() => {
+        if (recognitionRef.current === recognition && shouldContinueRef.current) {
+          setError('The browser started listening but returned no words. Check internet and Android Speech Services, or use your keyboard microphone to dictate.')
+        }
+      }, 12000)
       setRecording(true)
+      setError('')
     }
     recognition.onresult = (event) => {
       if (recognitionRef.current !== recognition) return
+      if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
+      setError('')
       const results = recognitionResultsRef.current
       results.length = event.results.length
       // Keep a copy of each result slot. Browsers may revise an interim slot
@@ -84,21 +100,34 @@ export default function RecordExpense() {
       const messages: Record<string, string> = {
         'audio-capture': 'No microphone was found. Connect a microphone and check your device input settings.',
         'language-not-supported': 'Speech recognition for English (India) is not supported by this browser.',
-        'network': 'The speech recognition service could not be reached. Check your internet connection and try again.',
+        'network': 'The browser speech service could not be reached. Check your internet connection; microphone permission alone does not enable speech recognition.',
         'no-speech': 'No speech was detected. Check your microphone input and speak a little closer to it.',
-        'not-allowed': 'Microphone access was blocked. Allow microphone access for this site in your browser settings, then try again.',
-        'service-not-allowed': 'The browser blocked its speech recognition service. Use the latest Chrome or Edge and allow microphone access.',
+        'not-allowed': 'Browser speech recognition was blocked. Check site and phone microphone permissions. If this page uses a local network HTTP address, open its HTTPS URL instead.',
+        'service-not-allowed': 'This browser or its speech service does not allow recognition here. Use the microphone on your phone keyboard to dictate into the statement box.',
       }
       if (event.error !== 'aborted') {
         setError(messages[event.error] ?? `Speech recognition failed (${event.error}). Check microphone permissions and try again.`)
+        if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+        if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
         if (event.error !== 'no-speech') {
           shouldContinueRef.current = false
           setRecording(false)
         }
       }
     }
+    const armStartTimeout = () => {
+      startTimeoutRef.current = window.setTimeout(() => {
+        if (recognitionRef.current !== recognition || !shouldContinueRef.current || hasStartedRef.current) return
+        shouldContinueRef.current = false
+        setRecording(false)
+        setError('The phone did not start its speech service. Open this site over HTTPS in Chrome and check that Google Speech Services is available, or use your keyboard microphone to dictate.')
+        recognition.abort()
+      }, 8000)
+    }
     recognition.onend = () => {
       if (recognitionRef.current !== recognition) return
+      if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+      if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
       setText(finalTextRef.current)
       if (!shouldContinueRef.current) {
         setRecording(false)
@@ -112,9 +141,12 @@ export default function RecordExpense() {
       restartTimerRef.current = window.setTimeout(() => {
         if (!shouldContinueRef.current || recognitionRef.current !== recognition) return
         try {
+          hasStartedRef.current = false
           recognition.start()
+          armStartTimeout()
         } catch (err) {
           shouldContinueRef.current = false
+          if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
           setRecording(false)
           setError(err instanceof Error ? `Could not resume speech recognition: ${err.message}` : 'Could not resume speech recognition. Tap Start Recording to try again.')
         }
@@ -125,9 +157,13 @@ export default function RecordExpense() {
     try {
       // Start synchronously inside the tap handler. Mobile browsers may reject
       // recognition if microphone setup has awaited first.
+      hasStartedRef.current = false
       recognition.start()
+      armStartTimeout()
     } catch (err) {
       shouldContinueRef.current = false
+      if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+      if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
       setRecording(false)
       setError(err instanceof Error ? `Could not start speech recognition: ${err.message}` : 'Could not start speech recognition. Check microphone permissions and try again.')
     }
@@ -136,6 +172,8 @@ export default function RecordExpense() {
   const stopRecording = () => {
     shouldContinueRef.current = false
     if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
+    if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+    if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
     recognitionRef.current?.stop()
     setRecording(false)
   }
@@ -143,6 +181,8 @@ export default function RecordExpense() {
   const recordAgain = () => {
     shouldContinueRef.current = false
     if (restartTimerRef.current !== null) window.clearTimeout(restartTimerRef.current)
+    if (startTimeoutRef.current !== null) window.clearTimeout(startTimeoutRef.current)
+    if (resultTimeoutRef.current !== null) window.clearTimeout(resultTimeoutRef.current)
     recognitionRef.current?.abort()
     recognitionRef.current = null
     setRecording(false)
@@ -151,6 +191,11 @@ export default function RecordExpense() {
     recognitionBaseTextRef.current = ''
     setType('')
     setError('')
+  }
+
+  const usePhoneDictation = () => {
+    setError('The statement field is ready. Tap the microphone icon on your phone keyboard to dictate.')
+    document.getElementById('statement')?.focus()
   }
 
   const readBack = () => {
@@ -216,6 +261,7 @@ export default function RecordExpense() {
           </button>
           <h3>{recording ? 'Recording…' : text ? 'Recording stopped' : 'Ready to record'}</h3>
           <p className="muted">{recording ? 'Speak naturally, then press Stop Recording.' : 'Press Start Recording when you are ready.'}</p>
+          <p className="phone-voice-hint">On a phone, open the HTTPS site in Chrome. Local network HTTP addresses can block recognition even after microphone access is allowed.</p>
           <button className={recording ? 'stop-button' : 'primary'} onClick={recording ? stopRecording : startRecording} disabled={!supported}>
             {recording ? <><Square size={16} fill="currentColor" /> STOP RECORDING</> : <><Mic size={16} /> START RECORDING</>}
           </button>
@@ -224,7 +270,7 @@ export default function RecordExpense() {
         {error && <div className="error-box">{error}</div>}
 
         <div className="field">
-          <div className="field-title"><label htmlFor="statement">Recorded Statement</label>{text && <span>Current date will be saved automatically</span>}</div>
+          <div className="field-title"><label htmlFor="statement">Recorded Statement</label>{text && <span>Current date will be saved automatically</span>}<button type="button" className="secondary phone-dictation" onClick={usePhoneDictation}><Mic size={15} /> Use phone voice typing</button></div>
           <textarea id="statement" value={text} onChange={(e) => { setText(e.target.value); finalTextRef.current = e.target.value }} placeholder="Your converted statement will appear here…" rows={5} />
         </div>
 
